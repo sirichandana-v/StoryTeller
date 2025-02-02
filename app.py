@@ -1,18 +1,67 @@
 import time
+import asyncio
+import edge_tts
+import sounddevice as sd
+import numpy as np
+from io import BytesIO
+from pydub import AudioSegment
 from groq import Groq
 import os
 from dotenv import load_dotenv
-
+import tempfile
+import soundfile as sf
 
 load_dotenv()
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-
 client = Groq(api_key=GROQ_API_KEY)
 
-# Function to generate story using Groq
+def text_to_speech(text):
+    """Converts text to speech using Edge TTS and plays it."""
+    mp3_stream = BytesIO()
+    communicate = edge_tts.Communicate(text, "en-US-AriaNeural")
+    
+    async def stream_audio():
+        async for chunk in communicate.stream():
+            if chunk["type"] == "audio":
+                mp3_stream.write(chunk["data"])
+        
+        mp3_stream.seek(0)
+        audio = AudioSegment.from_file(mp3_stream, format="mp3")
+        wav_stream = BytesIO()
+        audio.export(wav_stream, format="wav")
+        wav_stream.seek(0)
+        
+        samples = np.array(audio.get_array_of_samples(), dtype=np.float32)
+        samples /= np.iinfo(audio.array_type).max  # Normalize
+        
+        sd.play(samples, samplerate=audio.frame_rate)
+        sd.wait()
+    
+    asyncio.run(stream_audio())
+
+def transcribe_audio():
+    """Records audio from the microphone and transcribes it using Groq ASR."""
+    print("🎤 Listening... Speak now!")
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as temp_wav:
+        duration = 10  # Adjust duration if needed
+        sample_rate = 16000
+        audio_data = sd.rec(int(duration * sample_rate), samplerate=sample_rate, channels=1, dtype='int16')
+        sd.wait()
+        sf.write(temp_wav.name, audio_data, sample_rate)
+        temp_wav_path = temp_wav.name
+    
+    with open(temp_wav_path, "rb") as audio_file:
+        response = client.audio.transcriptions.create(
+            model="whisper-large-v3",
+            file=audio_file,
+            language="en"
+        )
+    os.remove(temp_wav_path)
+    return response.text
+
 def generate_story(prompt):
     response = client.chat.completions.create(
-        model="llama3-70b-8192",  # Use the available Groq model
+        model="llama3-70b-8192",
         messages=[{"role": "user", "content": prompt}],
         temperature=0.7,
     )
@@ -20,7 +69,9 @@ def generate_story(prompt):
 
 def main():
     print("👴 Grandpa: Well hello there, young one! What kind of story do you want to hear today?")
-    story_type = input("You: ")
+    text_to_speech("Well hello there, young one! What kind of story do you want to hear today?")
+    story_type = transcribe_audio()
+    print("You:", story_type)
 
     prompt = f"""Tell me a {story_type} story in the voice of an old, wise grandpa. 
     Speak as if you are telling the story to a child, with warmth, humor, and dramatic pauses. 
@@ -30,30 +81,30 @@ def main():
     
     story = generate_story(prompt)
     
-    while True:  # Keep the storytelling loop going
-        sentences = story.split('. ')  # Reset story sentences
+    while True:
+        sentences = story.split('. ')
         for sentence in sentences:
             print("👴 Grandpa:", sentence)
-            time.sleep(2)  # Simulate storytelling pace
-
-            # Check if Grandpa is asking a question
+            text_to_speech(sentence)
+            time.sleep(1)
+            
             if "what do you think" in sentence.lower() or "should" in sentence.lower() or "what happens next" in sentence.lower():
                 print("👴 Grandpa: I'm listening... what should happen next?")
-                user_input = input("You: ")
+                text_to_speech("I'm listening... what should happen next?")
+                user_input = transcribe_audio()
+                print("You:", user_input)
                 
                 if user_input.lower() in ["stop", "exit", "end"]:
                     print("👴 Grandpa: Alright then, we'll continue another time! *chuckles*")
-                    return  # Ends the program
+                    text_to_speech("Alright then, we'll continue another time! *chuckles*")
+                    return
                 
-                # Generate a new part of the story based on user input
                 story = generate_story(f"""Grandpa chuckles and nods after hearing: "{user_input}". 
 He strokes his beard, responding with warmth, humor, or a bit of old wisdom. 
 Then, he naturally weaves the suggestion into the story and continues telling it as an old wise storyteller. 
 Make sure Grandpa stays fully in character and does NOT explain what he is doing.
 """)
-                
-                # Restart the for loop with the new story
-                break  # Break out of the loop to restart with a new story
+                break
 
 if __name__ == "__main__":
     main()
